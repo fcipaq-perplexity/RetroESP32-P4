@@ -1008,7 +1008,7 @@ void snes_run(const char *rom_path)
         /* Ensure GSU.pvRam matches after reset */
         GSU.pvRam = SuperFX.pvRam;
         GSU.nRamBanks = SuperFX.nRamBanks;
-        ESP_LOGI(TAG, "SuperFX initialized, %d KB GSU RAM (shared SRAM), SRAMMask=0x%lX",
+        ESP_LOGI(TAG, "SuperFX initialized, %lu KB GSU RAM (shared SRAM), SRAMMask=0x%lX",
                  SuperFX.nRamBanks * 64, (unsigned long)Memory.SRAMMask);
         ESP_LOGI(TAG, "FillRAM[3030]=%02X [3031]=%02X [303B]=%02X after reset",
                  Memory.FillRAM[0x3030], Memory.FillRAM[0x3031], Memory.FillRAM[0x303B]);

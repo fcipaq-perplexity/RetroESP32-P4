@@ -175,10 +175,6 @@
     // Joystick
     odroid_input_gamepad_init();
 
-#ifndef CONFIG_HDMI_OUTPUT
-    // Touch panel
-    gt911_touch_init(7, 8, -1, -1);
-#endif
 
     // === SAFE MODE: Hold button A during boot ===
     // On ESP32-P4 there is no OTA partition table, so we just
@@ -1166,28 +1162,9 @@
     display_flush();
   }
   void apply_brightness() {
-    const int DUTY_MAX = 0x1fff;
     BRIGHTNESS = get_brightness();
-    int duty = DUTY_MAX * (BRIGHTNESS_LEVELS[BRIGHTNESS] * 0.01f);
-
-    if(is_backlight_initialized()) {
-      currentDuty = ledc_get_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-      if (currentDuty != duty) {
-        //ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, currentDuty);
-        //ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-        //ledc_set_fade_with_time(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty, 1000);
-        //ledc_fade_start(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, LEDC_FADE_WAIT_DONE /*LEDC_FADE_NO_WAIT|LEDC_FADE_WAIT_DONE|LEDC_FADE_MAX*/);
-        //ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-        //ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-        ledc_set_fade_time_and_start(
-          LEDC_LOW_SPEED_MODE,
-          LEDC_CHANNEL_0,
-          duty,
-            25,
-          LEDC_FADE_WAIT_DONE
-        );
-      }
-    }
+    /* Backlight is a 100 kHz PWM owned by the LCD driver (see the LCD driver component). */
+    display_set_backlight(BRIGHTNESS_LEVELS[BRIGHTNESS]);
   }
 //}#pragma endregion Brightness
 
@@ -2694,270 +2671,7 @@
 //}#pragma endregion Favorites
 
 //{#pragma region Search
-#ifndef CONFIG_HDMI_OUTPUT
-  /*
-   * Touch-based visual keyboard search for the ROM browser.
-   * X button toggles open/closed. Touch keys to type.
-   * The file list scrolls to the first match as you type.
-   * A confirms (jumps to match and closes). B/X close.
-   *
-   * Keyboard layout (4 rows, bottom of screen):
-   *   Row 0: Q W E R T Y U I O P
-   *   Row 1: A S D F G H J K L
-   *   Row 2: Z X C V B N M
-   *   Row 3: [SPACE] [DEL] [CLOSE]
-   *
-   * Touch coordinates from GT911 are portrait 480x800.
-   * UI is 800x480 (270 deg CCW rotation).
-   * Mapping: ui_x = touch_y,  ui_y = 479 - touch_x
-   */
 
-  #define KB_ROWS      4
-  #define KB_KEY_W     68   /* key width in UI pixels  */
-  #define KB_KEY_H     42   /* key height in UI pixels */
-  #define KB_GAP       4    /* gap between keys        */
-  #define KB_Y_START   290  /* Y offset for top of keyboard area */
-  #define KB_X_PAD     16   /* left padding */
-  #define SEARCH_MAX   20   /* max search string length */
-
-  static const char *kb_rows[KB_ROWS] = {
-    "QWERTYUIOP",
-    "ASDFGHJKL",
-    "ZXCVBNM",
-    NULL  /* special row: SPACE, DEL, CLOSE */
-  };
-  static const int kb_row_len[KB_ROWS] = { 10, 9, 7, 3 };
-
-  /* Draw a single key */
-  static void kb_draw_key(int kx, int ky, int kw, int kh,
-                           const char *label, bool highlight) {
-    uint16_t bg = highlight ? 0x4208 : 0x2104;  /* lighter/darker gray */
-    uint16_t fg = 0xFFFF;  /* white text */
-    uint16_t border = 0x6B4D;  /* light gray border */
-
-    /* Fill background strip by strip (buffer is 64000 shorts max) */
-    int total = kw * kh;
-    if (total > 64000) total = 64000;
-    for (int i = 0; i < total; i++) buffer[i] = bg;
-    /* Top border */
-    for (int i = 0; i < kw; i++) buffer[i] = border;
-    /* Bottom border */
-    for (int i = (kh - 1) * kw; i < kh * kw; i++) buffer[i] = border;
-    /* Left/right border */
-    for (int r = 0; r < kh; r++) {
-      buffer[r * kw] = border;
-      buffer[r * kw + kw - 1] = border;
-    }
-    ili9341_write_frame_rectangleLE(kx, ky, kw, kh, buffer);
-
-    /* Draw label centered in key */
-    int len = strlen(label);
-    int tx = kx + (kw - len * 16) / 2;  /* 16px per char at 2x */
-    int ty = ky + (kh - 32) / 2;
-    /* Use normal (non-ext) draw: one char at a time */
-    for (int c = 0; c < len; c++) {
-      char ch = label[c];
-      if (ch == ' ') { tx += 16; continue; }
-      int glyph = (ch >= 32 && ch <= 126) ? ch - 32 : '?' - 32;
-      int idx = 0;
-      for (int row = 0; row < 16; row++) {
-        uint8_t bits = FONT_8x16[glyph][row];
-        for (int sr = 0; sr < 2; sr++) {
-          for (int col = 7; col >= 0; col--) {
-            buffer[idx++] = (bits & (1 << col)) ? fg : bg;
-            buffer[idx++] = (bits & (1 << col)) ? fg : bg;
-          }
-        }
-      }
-      ili9341_write_frame_rectangleLE(tx, ty, 16, 32, buffer);
-      tx += 16;
-    }
-  }
-
-  /* Draw the full keyboard overlay */
-  static void kb_draw(const char *search_str) {
-    /* Search bar at top of keyboard area */
-    int bar_y = KB_Y_START - 44;
-    draw_mask(0, bar_y, WIDTH, 44);
-
-    /* Draw "SEARCH:" label + current text */
-    char display_str[SEARCH_MAX + 12];
-    snprintf(display_str, sizeof(display_str), "SEARCH: %s_", search_str);
-    draw_text(KB_X_PAD, bar_y + 6, display_str, false, true, false);
-
-    /* Clear keyboard area */
-    draw_mask(0, KB_Y_START, WIDTH, KB_ROWS * (KB_KEY_H + KB_GAP) + KB_GAP);
-
-    /* Draw letter rows */
-    for (int r = 0; r < 3; r++) {
-      const char *row = kb_rows[r];
-      int row_len = kb_row_len[r];
-      int row_width = row_len * (KB_KEY_W + KB_GAP) - KB_GAP;
-      int x_start = (WIDTH - row_width) / 2;
-      int ky = KB_Y_START + r * (KB_KEY_H + KB_GAP);
-
-      for (int k = 0; k < row_len; k++) {
-        int kx = x_start + k * (KB_KEY_W + KB_GAP);
-        char label[2] = { row[k], '\0' };
-        kb_draw_key(kx, ky, KB_KEY_W, KB_KEY_H, label, false);
-      }
-    }
-
-    /* Special row 3: SPACE, DEL, CLOSE */
-    int r3_y = KB_Y_START + 3 * (KB_KEY_H + KB_GAP);
-    int space_w = 200, del_w = 120, close_w = 120;
-    int total_w = space_w + KB_GAP + del_w + KB_GAP + close_w;
-    int r3_x = (WIDTH - total_w) / 2;
-    kb_draw_key(r3_x, r3_y, space_w, KB_KEY_H, "SPACE", false);
-    kb_draw_key(r3_x + space_w + KB_GAP, r3_y, del_w, KB_KEY_H, "DEL", false);
-    kb_draw_key(r3_x + space_w + KB_GAP + del_w + KB_GAP, r3_y, close_w, KB_KEY_H, "SEARCH", false);
-  }
-
-  /* Given a touch point in UI coordinates, return the pressed key char.
-   * Returns '\b' for DEL, ' ' for SPACE, '\x1b' for CLOSE, '\0' for no hit. */
-  static char kb_hit_test(int ui_x, int ui_y) {
-    /* Letter rows */
-    for (int r = 0; r < 3; r++) {
-      int row_len = kb_row_len[r];
-      int row_width = row_len * (KB_KEY_W + KB_GAP) - KB_GAP;
-      int x_start = (WIDTH - row_width) / 2;
-      int ky = KB_Y_START + r * (KB_KEY_H + KB_GAP);
-
-      if (ui_y >= ky && ui_y < ky + KB_KEY_H) {
-        for (int k = 0; k < row_len; k++) {
-          int kx = x_start + k * (KB_KEY_W + KB_GAP);
-          if (ui_x >= kx && ui_x < kx + KB_KEY_W) {
-            return kb_rows[r][k];
-          }
-        }
-      }
-    }
-
-    /* Special row */
-    int r3_y = KB_Y_START + 3 * (KB_KEY_H + KB_GAP);
-    if (ui_y >= r3_y && ui_y < r3_y + KB_KEY_H) {
-      int space_w = 200, del_w = 120, close_w = 120;
-      int total_w = space_w + KB_GAP + del_w + KB_GAP + close_w;
-      int r3_x = (WIDTH - total_w) / 2;
-      if (ui_x >= r3_x && ui_x < r3_x + space_w) return ' ';
-      if (ui_x >= r3_x + space_w + KB_GAP && ui_x < r3_x + space_w + KB_GAP + del_w) return '\b';
-      if (ui_x >= r3_x + space_w + KB_GAP + del_w + KB_GAP &&
-          ui_x < r3_x + space_w + KB_GAP + del_w + KB_GAP + close_w) return '\x1b';
-    }
-
-    return '\0';
-  }
-
-  /* Search: find the first SORTED_FILES entry matching prefix (case-insensitive).
-   * First tries prefix match, then falls back to substring (contains) match.
-   * Returns the index in SORTED_FILES or -1.  */
-  static int search_find_match(const char *prefix) {
-    if (!SORTED_FILES || SORTED_COUNT == 0 || prefix[0] == '\0') return -1;
-    int plen = strlen(prefix);
-    /* Pass 1: prefix match */
-    for (int i = 0; i < SORTED_COUNT; i++) {
-      if (strncasecmp(SORTED_FILES[i], prefix, plen) == 0) return i;
-    }
-    /* Pass 2: substring match */
-    for (int i = 0; i < SORTED_COUNT; i++) {
-      const char *name = SORTED_FILES[i];
-      int nlen = strlen(name);
-      for (int j = 0; j <= nlen - plen; j++) {
-        if (strncasecmp(&name[j], prefix, plen) == 0) return i;
-      }
-    }
-    return -1;
-  }
-
-  /*
-   * show_search_keyboard - Main search entry point.
-   * Called when X is pressed in the browser (STEP >= 3).
-   * Draws keyboard, handles touch, updates search filter.
-   * On exit, ROMS.offset and BROWSER_SEL are set to the match position.
-   */
-  void show_search_keyboard(void) {
-    char search_str[SEARCH_MAX + 1] = "";
-    int search_len = 0;
-    bool was_touched = false;
-
-    /* Disable touch-to-button mapping so keyboard touches don't trigger MENU */
-    odroid_input_touch_buttons_disable = true;
-
-    /* Wait for all buttons release so we don't immediately exit */
-    do { vTaskDelay(pdMS_TO_TICKS(30)); odroid_input_gamepad_read(&gamepad); }
-    while (gamepad.values[ODROID_INPUT_MENU] || gamepad.values[ODROID_INPUT_A] ||
-           gamepad.values[ODROID_INPUT_B] || gamepad.values[ODROID_INPUT_X]);
-
-    /* Draw the keyboard */
-    kb_draw(search_str);
-    display_flush();
-
-    while (true) {
-      vTaskDelay(pdMS_TO_TICKS(30));
-
-      /* Check physical gamepad for exit (B closes, A confirms). */
-      odroid_input_gamepad_read(&gamepad);
-      if (gamepad.values[ODROID_INPUT_B]) {
-        debounce(ODROID_INPUT_B);
-        break;
-      }
-      if (gamepad.values[ODROID_INPUT_A]) {
-        debounce(ODROID_INPUT_A);
-        break;
-      }
-
-      /* Read touch */
-      uint16_t tx = 0, ty = 0;
-      bool touched = gt911_touch_get_xy(&tx, &ty);
-
-      /* Map portrait touch to landscape UI */
-      int ui_x = (int)ty;
-      int ui_y = 479 - (int)tx;
-
-      if (touched && !was_touched) {
-        /* New touch â€” check keyboard hit */
-        char key = kb_hit_test(ui_x, ui_y);
-
-        if (key == '\x1b') {
-          break;
-        } else if (key == '\b') {
-          if (search_len > 0) {
-            search_str[--search_len] = '\0';
-          }
-        } else if (key != '\0' && search_len < SEARCH_MAX) {
-          search_str[search_len++] = key;
-          search_str[search_len] = '\0';
-        }
-
-        if (key != '\0') {
-          int match = search_find_match(search_str);
-          if (match >= 0) {
-            ROMS.offset = match;
-            if (ROMS.offset + BROWSER_LIMIT > ROMS.total)
-              ROMS.offset = ROMS.total > BROWSER_LIMIT ? ROMS.total - BROWSER_LIMIT : 0;
-            BROWSER_SEL = match - ROMS.offset;
-          }
-          /* Redraw keyboard + search bar only (browser redraws on exit) */
-          kb_draw(search_str);
-          display_flush();
-        }
-      }
-
-      was_touched = touched;
-    }
-
-    /* Re-enable touch-to-button mapping */
-    odroid_input_touch_buttons_disable = false;
-
-    /* Redraw browser (clear keyboard overlay) */
-    if (ROMS.total > 0) {
-      seek_files();
-      draw_browser_screen();
-    }
-  }
-#endif /* !CONFIG_HDMI_OUTPUT */
-
-#ifdef CONFIG_HDMI_OUTPUT
   /*
    * Gamepad-driven visual keyboard search for the ROM browser (HDMI variant).
    * X button toggles open/closed. D-pad navigates, A selects key, B deletes.
@@ -3187,7 +2901,6 @@
       draw_browser_screen();
     }
   }
-#endif /* CONFIG_HDMI_OUTPUT */
 
 //}#pragma endregion Search
 
@@ -3971,7 +3684,6 @@
   â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€*/
   static int show_png_logo_native(void)
   {
-#ifdef CONFIG_HDMI_OUTPUT
     /* HDMI: load PNG and NN-scale to fill WIDTH×HEIGHT into framebuffer */
     pngObject png = {0};
     if (!loadPngFromFileRaw("/sd/boot_logo.png", &png, true, true)) return 0;
@@ -4002,70 +3714,6 @@
     free(src);
     display_flush();
     return 1;
-#else
-    pngObject png = {0};
-    if (!loadPngFromFile("/sd/boot_logo.png", &png, true, false)) return 0;
-    if (png.w == 0 || png.h == 0 || !png.data) return 0;
-
-    int pw = png.w, ph = png.h;
-    uint16_t *src = (uint16_t *)png.data;
-
-    /* Allocate DMA-aligned input for PPA (pngAux buffer may not be aligned) */
-    size_t in_size = pw * ph * 2;
-    size_t aligned_in = (in_size + 63) & ~63;
-    void *ppa_in = heap_caps_aligned_calloc(64, 1, aligned_in,
-                       MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!ppa_in) { free(src); return 0; }
-    memcpy(ppa_in, src, in_size);
-    free(src);
-
-    /* After 270Â° rotation, dimensions swap: rotated_w = ph, rotated_h = pw.
-       Force 2Ã— scale to fill 480Ã—800 LCD from a 240Ã—400 (or similar) logo. */
-    uint16_t lcd_w = st7701_lcd_width();   /* 480 */
-    uint16_t lcd_h = st7701_lcd_height();  /* 800 */
-    float scale_x = (float)lcd_w / (float)ph;   /* fit rotated width  */
-    float scale_y = (float)lcd_h / (float)pw;   /* fit rotated height */
-
-    /* PPA rotate 270Â° + scale â†’ output fills LCD */
-    uint32_t out_w = lcd_w;
-    uint32_t out_h = lcd_h;
-    size_t out_size = out_w * out_h * 2;
-    size_t aligned_out = (out_size + 63) & ~63;
-    void *ppa_out = heap_caps_aligned_calloc(64, 1, aligned_out,
-                        MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!ppa_out) { heap_caps_free(ppa_in); return 0; }
-
-    esp_err_t ret = ppa_rotate_scale_rgb565_to(
-        ppa_in, pw, ph, 270, scale_x, scale_y,
-        ppa_out, aligned_out, &out_w, &out_h, false);
-    heap_caps_free(ppa_in);
-    if (ret != ESP_OK) { heap_caps_free(ppa_out); return 0; }
-
-    /* Composite into a full-frame buffer */
-    size_t frame_size = lcd_w * lcd_h * sizeof(uint16_t);
-    size_t frame_aligned = (frame_size + 63) & ~63;
-    uint16_t *frame = (uint16_t *)heap_caps_aligned_calloc(64, 1, frame_aligned,
-                          MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!frame) { heap_caps_free(ppa_out); return 0; }
-
-    /* Blit rotated PNG into center of full frame */
-    uint16_t x = (lcd_w > out_w) ? (lcd_w - out_w) / 2 : 0;
-    uint16_t y = (lcd_h > out_h) ? (lcd_h - out_h) / 2 : 0;
-    uint16_t *rotated = (uint16_t *)ppa_out;
-    uint32_t blit_w = (out_w <= lcd_w) ? out_w : lcd_w;
-    uint32_t blit_h = (out_h <= lcd_h) ? out_h : lcd_h;
-    for (uint32_t row = 0; row < blit_h; row++) {
-      memcpy(&frame[(y + row) * lcd_w + x],
-             &rotated[row * out_w],
-             blit_w * sizeof(uint16_t));
-    }
-    heap_caps_free(ppa_out);
-
-    st7701_lcd_draw_bitmap(0, 0, lcd_w, lcd_h, frame);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    heap_caps_free(frame);
-    return 1;
-#endif /* !CONFIG_HDMI_OUTPUT */
   }
 
   /*â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4228,24 +3876,6 @@
 
     /* Clear full LCD so no leftovers from native PNG remain in the
        80-pixel bands that display_flush() does not cover. */
-#ifndef CONFIG_HDMI_OUTPUT
-    if (png_native) {
-      uint16_t lw = st7701_lcd_width();
-      uint16_t lh = st7701_lcd_height();
-      size_t fsz = (lw * lh * sizeof(uint16_t) + 63) & ~63;
-      uint16_t *blk = (uint16_t *)heap_caps_aligned_calloc(64, 1, fsz,
-                           MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-      if (blk) {
-        st7701_lcd_draw_bitmap(0, 0, lw, lh, blk);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        heap_caps_free(blk);
-      }
-      /* Skip built-in logo + credits when custom cover was shown */
-      draw_background();
-      display_flush();
-      return;
-    }
-#endif /* !CONFIG_HDMI_OUTPUT */
 
     /* â”€â”€ Phase 2: built-in logo + credit, 2 seconds â”€â”€ */
     draw_background();
@@ -5262,3 +4892,4 @@
   //}#pragma endregion GamePad
   }
 //}#pragma endregion Launcher
+
