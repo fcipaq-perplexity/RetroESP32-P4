@@ -1,12 +1,13 @@
 /*
  * Odroid System Compatibility Layer - ESP32-P4, Pico Held 2 v1.4
  *
- * Init order: power hold -> PPA -> USB gamepad -> audio (I2S) -> LCD (DSI).
+ * Init order: power hold -> USB console -> PPA -> USB gamepad -> audio (I2S) -> LCD (DSI).
  * No I2C devices (no touch panel, no audio codec) on this board.
  */
 
 #include "odroid_system.h"
 #include "pins_config.h"
+#include "pico_usb_console.h"
 #include "st7701_lcd.h"
 #include "ppa_engine.h"
 #include "gamepad.h"
@@ -42,9 +43,12 @@ void odroid_system_init(void)
 {
     if (s_initialized) return;
 
-    ESP_LOGI(TAG, "=== RetroESP32-P4 System Init (Pico Held 2 v1.4) ===");
-
     init_power();
+
+    /* Console over USB CDC (no-op unless CONFIG_TINYUSB_CDC_ENABLED) */
+    pico_usb_console_start();
+
+    ESP_LOGI(TAG, "=== RetroESP32-P4 System Init (Pico Held 2 v1.4) ===");
 
     ESP_LOGI(TAG, "Initializing PPA 2D engine...");
     ESP_ERROR_CHECK(ppa_engine_init());

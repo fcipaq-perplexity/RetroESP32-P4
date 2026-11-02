@@ -1,0 +1,6 @@
+## IDF Component Manager Manifest File
+## esp_tinyusb provides the USB CDC console (used only when
+## CONFIG_TINYUSB_CDC_ENABLED is set; unused code is not linked otherwise).
+dependencies:
+  idf: "^5.4"
+  espressif/esp_tinyusb: "~1.7.6"
