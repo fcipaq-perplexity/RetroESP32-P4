@@ -1,10 +1,9 @@
 /*
- * Odroid Display Compatibility Layer for ESP32-P4
+ * Odroid Display Compatibility Layer for ESP32-P4 (Pico Held 2 v1.4, 720x720)
  *
- * Provides the original ILI9341 API surface.
- * Internally renders to a 320×240 PSRAM framebuffer, then uses
- * PPA hardware to rotate (270° CCW) and scale (2×) for the
- * 480×800 MIPI DSI display.
+ * Provides the original ILI9341 API surface.  The launcher draws into a
+ * 720x480 landscape framebuffer in PSRAM; the PPA rotates it 270 deg and the
+ * result is drawn centred on the square 720x720 DSI panel.
  */
 #pragma once
 
@@ -16,173 +15,88 @@
 extern "C" {
 #endif
 
-/**
- * @brief Initialize the display subsystem.
- * Allocates the 320×240 virtual framebuffer in PSRAM,
- * initializes the ST7701 MIPI DSI LCD (if not already done),
- * and clears the screen to black.
- */
+/** Allocate the 720x480 virtual framebuffer (the LCD itself is started by odroid_system_init()). */
 void ili9341_init(void);
 
-/**
- * @brief Write a rectangular region of RGB565 pixels.
- * Copies the pixel data into the virtual 320×240 framebuffer.
- * Call display_flush() to push changes to the physical LCD.
- *
- * @param x     Left coordinate (0..319)
- * @param y     Top coordinate (0..239)
- * @param w     Width in pixels
- * @param h     Height in pixels
- * @param data  Pointer to RGB565 pixel data (w*h elements)
- */
+/** Copy a rectangle of RGB565 pixels into the virtual framebuffer (clipped).
+ *  Call display_flush() to push changes to the panel. */
 void ili9341_write_frame_rectangleLE(int x, int y, int w, int h, const uint16_t *data);
 
-/**
- * @brief Clear the entire virtual framebuffer to a solid color.
- * @param color RGB565 color value
- */
+/** Clear the entire virtual framebuffer to a solid RGB565 color. */
 void ili9341_clear(uint16_t color);
 
-/**
- * @brief Flush the 320×240 framebuffer to the physical LCD.
- * Performs PPA rotate 270° CCW → scale 2× → display centered on 480×800.
- * Only flushes if the framebuffer has been modified since the last flush.
- */
+/** Flush the framebuffer to the panel (PPA rotate 270 deg, centred). Only if modified. */
 void display_flush(void);
 
-/**
- * @brief Force a flush even if the framebuffer hasn't been modified.
- */
+/** Force a flush even if the framebuffer has not been modified. */
 void display_flush_force(void);
 
-/**
- * @brief Set custom PPA scale factors for the rotate+scale pipeline.
- * Default is 2.0×2.0 (320×240 → 480×640). For example, 2.0×2.5
- * fills the full 480×800 LCD after 270° rotation.
- * @param sx  Horizontal scale factor (applied after rotation)
- * @param sy  Vertical scale factor (applied after rotation)
- */
+/** Set PPA scale factors used by display_flush() (default 1.0 x 1.0). */
 void display_set_scale(float sx, float sy);
 
-/**
- * @brief Check if LEDC backlight has been initialized.
- * @return true if initialized
- */
+/** Set backlight brightness, 0..100 percent. */
+void display_set_backlight(int percent);
+
+/** True once the LCD and backlight are running. */
 bool is_backlight_initialized(void);
 
-/**
- * @brief Get a direct pointer to the 320×240 framebuffer (for advanced use).
- * @return Pointer to the RGB565 framebuffer (320*240 = 76,800 elements)
- */
+/** Direct pointer to the 720x480 framebuffer (RGB565). */
 uint16_t *display_get_framebuffer(void);
 
-/**
- * @brief Get a pointer to the 320×240 emulator-scaled buffer.
- * Used by in-game menus. Draw with 320-pixel stride, then call display_emu_flush().
- */
+/** Pointer to the 320x240 emulator buffer (in-game menus). Draw with a 320-pixel
+ *  stride, then call display_emu_flush(). */
 uint16_t *display_get_emu_buffer(void);
 
-/**
- * @brief Flush the 320×240 emulator buffer via PPA 2× scale + 270° rotate → 480×640 LCD.
- */
+/** Flush the 320x240 emulator buffer (PPA scale + 270 deg rotate, centred). */
 void display_emu_flush(void);
 
-/**
- * @brief Draw raw RGB565 pixels directly to the LCD at portrait coordinates.
- * Thread-safe (takes/releases the display lock).
- * @param x  Portrait x position
- * @param y  Portrait y position
- * @param w  Width in pixels (portrait x direction)
- * @param h  Height in pixels (portrait y direction)
- * @param data  RGB565 pixel data (w*h elements, DMA-capable memory)
- */
+/** Legacy: drew raw pixels at portrait coordinates for the touch sidebar
+ *  buttons.  A no-op on this board. */
 void display_lcd_draw_raw(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                           const uint16_t *data);
 
-/* ─── Emulator-specific display write functions ───────────────── */
+/* --- Emulator-specific display write functions ----------------- */
 
-/**
- * @brief Write a Game Boy framebuffer (160x144, direct RGB565).
- * Centers on the 320×240 virtual framebuffer and flushes.
- * @param buffer  RGB565 pixel data (160×144), or NULL to clear
- * @param scale   Scaling mode (ignored on P4 — PPA handles scaling)
- */
+/** Game Boy framebuffer (160x144, direct RGB565). */
 void ili9341_write_frame_gb(uint16_t *buffer, int scale);
 
-/**
- * @brief Write a NES framebuffer (256x224, 8-bit palette-indexed).
- * @param buffer    8-bit indexed framebuffer (256×224), or NULL to clear
- * @param myPalette 256-entry RGB565 palette (already byte-swapped for HW)
- * @param scale     Scaling mode (ignored on P4)
- */
+/** NES framebuffer (256x224, 8-bit palette-indexed, byte-swapped RGB565 palette). */
 void ili9341_write_frame_nes(uint8_t *buffer, uint16_t *myPalette, uint8_t scale);
 
-/**
- * @brief Write an SMS/Game Gear framebuffer (indexed).
- * SMS: 256×192  Game Gear: 160×144 (within 256-wide buffer at offset 48)
- * @param buffer      8-bit indexed framebuffer, or NULL to clear
- * @param color       Palette (RGB565)
- * @param isGameGear  True for Game Gear mode
- * @param scale       Scaling mode (ignored on P4)
- */
+/** SMS/Game Gear framebuffer (indexed). SMS 256x192; Game Gear 160x144 at offset 48. */
 void ili9341_write_frame_sms(uint8_t *buffer, uint16_t color[], uint8_t isGameGear, uint8_t scale);
 
-/**
- * @brief Write a C64-style indexed framebuffer (384x272, 8-bit palette indices).
- * Converts via palette to RGB565 and writes the center 320x240 region.
- */
+/** C64-style indexed framebuffer (384x272); the centre 320x240 is shown. */
 void ili9341_write_frame_c64(uint8_t *buffer, uint16_t *palette);
 
-/**
- * @brief Write an Atari 7800 framebuffer (320×240, 8-bit palette-indexed).
- * Converts via palette to RGB565 directly into the 320×240 framebuffer.
- * @param buffer    8-bit indexed framebuffer (320×240), or NULL to clear
- * @param palette   256-entry RGB565 palette
- */
+/** Atari 7800 framebuffer (320x240, 8-bit palette-indexed). */
 void ili9341_write_frame_prosystem(uint8_t *buffer, uint16_t *palette);
 
-/**
- * @brief Write an Atari Lynx framebuffer (160×102, pre-decoded RGB565).
- * PPA hardware-scales to 320×240 and flushes.
- * @param buffer  160×102 RGB565 pixels, or NULL to clear
- */
+/** Atari Lynx framebuffer (160x102, RGB565). */
 void ili9341_write_frame_lynx(const uint16_t *buffer);
 
-/**
- * @brief Write a pre-rendered RGB565 framebuffer (320×240, LE byte-swapped).
- * Uses PPA hardware to scale 2× and rotate 270° in one operation.
- * @param buffer  320×240 RGB565 pixels in little-endian byte order, or NULL to clear
- */
+/** Pre-rendered 320x240 RGB565 frame (little-endian byte order). */
 void ili9341_write_frame_rgb565(const uint16_t *buffer);
 
-/**
- * @brief Write a pre-rendered RGB565 framebuffer with byte-swap control.
- * @param buffer         320×240 RGB565 pixels, or NULL to clear
- * @param byte_swap_input  true if input is BE and PPA should byte-swap to LE
- */
+/** Pre-rendered 320x240 RGB565 frame with optional PPA byte swap. */
 void ili9341_write_frame_rgb565_ex(const uint16_t *buffer, bool byte_swap_input);
 
 /**
- * @brief Write an arbitrary-size RGB565 framebuffer with PPA scale + rotate.
- * PPA scales by 'scale' and rotates 270°, centered on the 480×800 LCD.
- * Manages PPA buffer, border clearing, and display locking internally.
- * @param buffer          RGB565 pixels (in_w × in_h), or NULL to clear
- * @param in_w            Input width in pixels
- * @param in_h            Input height in pixels
- * @param scale           Scale factor (e.g. 2.0 for 2× integer scaling)
- * @param byte_swap_input true if PPA should byte-swap (BE→LE)
+ * Arbitrary-size RGB565 frame, PPA scale + rotate 270 deg, centred on the panel.
+ * Sources wider than 720/scale are cropped equally on both sides.  Console-class
+ * sources 241..256 px wide (SNES/NES/SMS) are shown at 3x when 2.0 is requested.
  */
 void ili9341_write_frame_rgb565_custom(const uint16_t *buffer, uint16_t in_w,
                                         uint16_t in_h, float scale,
                                         bool byte_swap_input);
 
-/** @brief Power off the display (no-op on P4 — LCD stays on). */
+/** Backlight off (avoids a flash during OTA reboot). */
 void ili9341_poweroff(void);
 
-/** @brief Prepare the display for emulator use (no-op on P4). */
+/** Prepare the display for emulator use (no-op on P4). */
 void ili9341_prepare(void);
 
-/* ─── Display locking (per-emulator mutexes map to single mutex) ─ */
+/* --- Display locking (per-emulator mutexes map to a single mutex) - */
 void odroid_display_lock(void);
 void odroid_display_unlock(void);
 void odroid_display_lock_gb_display(void);
@@ -192,7 +106,7 @@ void odroid_display_unlock_nes_display(void);
 void odroid_display_lock_sms_display(void);
 void odroid_display_unlock_sms_display(void);
 
-/* ─── Status screens ──────────────────────────────────────────── */
+/* --- Status screens ------------------------------------------- */
 #define ODROID_SD_ERR_NOCARD  0
 #define ODROID_SD_ERR_BADFILE 1
 void odroid_display_show_sderr(int errNum);

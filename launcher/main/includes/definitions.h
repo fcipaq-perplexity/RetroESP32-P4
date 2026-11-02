@@ -1,11 +1,9 @@
 /*
-  Screen Dimensions in Pixels
+  Screen Dimensions in Pixels (virtual landscape framebuffer).
+  Must equal FB_W x FB_H in components/odroid/odroid_display.c; the display
+  layer rotates it onto the 720x720 panel.
 */
-#ifdef CONFIG_HDMI_OUTPUT
-#define WIDTH 640
-#else
-#define WIDTH 800
-#endif
+#define WIDTH 720
 #define HEIGHT 480
 
 /*
@@ -17,11 +15,7 @@
 /*
   Show Battery Status
 */
-#ifdef CONFIG_HDMI_OUTPUT
-#define BATTERY false
-#else
 #define BATTERY true
-#endif
 
 /*
   Global Colors
