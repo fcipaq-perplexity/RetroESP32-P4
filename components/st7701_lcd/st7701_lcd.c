@@ -6,13 +6,15 @@
  * The pixel path uses ESP-IDF's stock DPI panel (one framebuffer in PSRAM,
  * filled via esp_lcd_panel_draw_bitmap / PPA), not the custom line-scan driver.
  *
- * (Legacy "st7701" file/function names are kept for source compatibility.)
+ * (Legacy st7701 file/function names are kept for source compatibility.)
  */
 #include "sdkconfig.h"
 #include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_attr.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_interface.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -46,6 +48,9 @@
  * 127 as the maximum when running from battery; 100% maps to this value. */
 #define BL_DUTY_MAX     127
 
+/* Max time to wait for the previous DMA2D draw to finish */
+#define DRAW_WAIT_MS    200
+
 static const char *TAG = "lcd_hd395003c30";
 
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
@@ -53,6 +58,9 @@ static esp_lcd_panel_io_handle_t s_io_handle = NULL;
 static esp_lcd_dsi_bus_handle_t s_dsi_bus = NULL;
 static bool s_ready = false;
 static bool s_bl_pwm_ready = false;
+
+/* Given whenever no DMA2D draw is in flight */
+static SemaphoreHandle_t s_draw_done = NULL;
 
 /* -- Panel init sequence (HD395003C30) ------------------------- */
 typedef struct {
@@ -164,6 +172,36 @@ static esp_err_t new_hd_panel(esp_lcd_panel_io_handle_t io, esp_lcd_dsi_bus_hand
     return ESP_OK;
 }
 
+/* -- Draw synchronisation -------------------------------------- */
+/* esp_lcd_panel_draw_bitmap() is asynchronous with DMA2D and refuses to start
+ * a new draw while the previous one is still running.  The color-trans-done
+ * callback releases a semaphore that every draw waits on. */
+static bool IRAM_ATTR on_color_trans_done(esp_lcd_panel_handle_t panel,
+                                          esp_lcd_dpi_panel_event_data_t *edata,
+                                          void *user_ctx)
+{
+    (void)panel; (void)edata; (void)user_ctx;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_draw_done, &woken);
+    return woken == pdTRUE;
+}
+
+static esp_err_t draw_sync(int x0, int y0, int x1, int y1, const void *data)
+{
+    if (s_draw_done && xSemaphoreTake(s_draw_done, pdMS_TO_TICKS(DRAW_WAIT_MS)) != pdTRUE)
+        ESP_LOGW(TAG, "previous draw did not finish within %d ms", DRAW_WAIT_MS);
+    esp_err_t ret = esp_lcd_panel_draw_bitmap(s_panel_handle, x0, y0, x1, y1, data);
+    if (ret != ESP_OK && s_draw_done)
+        xSemaphoreGive(s_draw_done);   /* nothing was started */
+    return ret;
+}
+
+static void draw_wait_idle(void)
+{
+    if (s_draw_done && xSemaphoreTake(s_draw_done, pdMS_TO_TICKS(DRAW_WAIT_MS)) == pdTRUE)
+        xSemaphoreGive(s_draw_done);
+}
+
 /* -- Backlight: LEDC PWM on PIN_LCD_BL_PWM + enable line ------- */
 static void backlight_pwm_init(void)
 {
@@ -248,6 +286,16 @@ esp_err_t st7701_lcd_init(void)
         .flags = { .use_dma2d = true },
     };
     ESP_RETURN_ON_ERROR(new_hd_panel(s_io_handle, s_dsi_bus, &dpi_cfg, &s_panel_handle), TAG, "panel create failed");
+
+    s_draw_done = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(s_draw_done, ESP_ERR_NO_MEM, TAG, "no mem for draw semaphore");
+    xSemaphoreGive(s_draw_done);
+    esp_lcd_dpi_panel_event_callbacks_t cbs = {
+        .on_color_trans_done = on_color_trans_done,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_dpi_panel_register_event_callbacks(s_panel_handle, &cbs, NULL),
+                        TAG, "register DPI callbacks failed");
+
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel_handle), TAG, "panel reset failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel_handle), TAG, "panel init failed");
 
@@ -272,20 +320,22 @@ esp_err_t st7701_lcd_draw_bitmap(uint16_t x_start, uint16_t y_start,
                                   uint16_t x_end, uint16_t y_end,
                                   const uint16_t *color_data)
 {
-    return esp_lcd_panel_draw_bitmap(s_panel_handle, x_start, y_start, x_end, y_end, color_data);
+    return draw_sync(x_start, y_start, x_end, y_end, color_data);
 }
 
 esp_err_t st7701_lcd_draw_rgb_bitmap(uint16_t x, uint16_t y,
                                       uint16_t w, uint16_t h,
                                       const uint16_t *color_data)
 {
-    return esp_lcd_panel_draw_bitmap(s_panel_handle, x, y, x + w, y + h, color_data);
+    return draw_sync(x, y, x + w, y + h, color_data);
 }
 
 esp_err_t st7701_lcd_draw_to_fb(uint16_t x, uint16_t y,
                                 uint16_t w, uint16_t h,
                                 const uint16_t *data)
 {
+    draw_wait_idle();
+
     void *fb = NULL;
     esp_err_t ret = esp_lcd_dpi_panel_get_frame_buffer(s_panel_handle, 1, &fb);
     if (ret != ESP_OK || !fb) return ret ? ret : ESP_ERR_INVALID_STATE;
@@ -311,12 +361,14 @@ esp_err_t st7701_lcd_fill_screen(uint16_t color)
         uint16_t *cpu_buf = (uint16_t *)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
         if (!cpu_buf) return ESP_ERR_NO_MEM;
         for (int i = 0; i < LCD_H_RES * LCD_V_RES; i++) cpu_buf[i] = color;
-        ret = esp_lcd_panel_draw_bitmap(s_panel_handle, 0, 0, LCD_H_RES, LCD_V_RES, cpu_buf);
+        ret = draw_sync(0, 0, LCD_H_RES, LCD_V_RES, cpu_buf);
+        draw_wait_idle();   /* the DMA must finish before the buffer is freed */
         heap_caps_free(cpu_buf);
         return ret;
     }
 
-    ret = esp_lcd_panel_draw_bitmap(s_panel_handle, 0, 0, LCD_H_RES, LCD_V_RES, color_data);
+    ret = draw_sync(0, 0, LCD_H_RES, LCD_V_RES, color_data);
+    draw_wait_idle();       /* the DMA must finish before the buffer is freed */
     heap_caps_free(color_data);
     return ret;
 }
