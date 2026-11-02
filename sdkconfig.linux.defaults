@@ -1,0 +1,9 @@
+# Applied last by tools/linux_firmware.py to the launcher and every app.
+#
+# ESP-IDF 5.4 offers 200 MHz PSRAM on ESP32-P4 only when experimental features
+# are enabled.  Without them the CONFIG_SPIRAM_SPEED_200M=y line in the
+# per-app sdkconfig.defaults is silently ignored and the PSRAM runs at 20 MHz,
+# which is too slow for the DSI scan-out (the screen stays cyan after the first
+# few lines).
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+CONFIG_SPIRAM_SPEED_200M=y

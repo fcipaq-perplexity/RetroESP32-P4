@@ -48,6 +48,11 @@ def build(variant, clean=False):
             defaults.append(str(project / 'sdkconfig.defaults'))
         if variant == 'hdmi':
             defaults.append(str(ROOT / 'launcher/sdkconfig.hdmi.defaults'))
+        # Applied last so it wins: ESP-IDF 5.4 ignores CONFIG_SPIRAM_SPEED_200M
+        # (falling back to 20 MHz) unless experimental features are enabled.
+        overlay = ROOT / 'sdkconfig.linux.defaults'
+        if overlay.is_file():
+            defaults.append(str(overlay))
         run([idf, '-B', work, '-DIDF_TARGET=esp32p4',
              '-DSDKCONFIG=' + str(config),
              '-DSDKCONFIG_DEFAULTS=' + ';'.join(defaults), 'build'], cwd=project)
