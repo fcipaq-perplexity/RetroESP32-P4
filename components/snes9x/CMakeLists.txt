@@ -23,7 +23,8 @@ set(SNES9X_SRCS
     c4.c
     dsp1.c
     getset.c
-    fxstub.c
+    fxemu.c
+    fxinst.c
 )
 
 idf_component_register(
@@ -52,6 +53,10 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -O3
 )
 
-# Use inline COLOR_SUB1_2 instead of GFX.ZERO lookup table (which is not
-# allocated on ESP32). Without this, DKC colour-math effects dereference NULL.
+# SuperFX opcode handlers are many tiny functions. Build them for size so the
+# SNES app still fits its OTA partition.
+set_source_files_properties(fxinst.c PROPERTIES COMPILE_OPTIONS -Os)
+
+# Use inline COLOR_SUB1_2 instead of GFX.ZERO lookup table which is not
+# allocated on ESP32. Without this, DKC colour-math effects dereference NULL.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC NO_ZERO_LUT)
